@@ -255,6 +255,7 @@ export default function CEOMentor() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [started, setStarted] = useState(false);
   const [hoveredMentor, setHoveredMentor] = useState(null);
   const bottomRef = useRef(null);
@@ -275,25 +276,66 @@ export default function CEOMentor() {
     try {
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+        },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
+          model: "claude-opus-4-6",
+          max_tokens: 1024,
+          stream: true,
           system: SYSTEM_PROMPT,
           messages: newMessages,
         }),
       });
-      const data = await response.json();
-      const reply = data.content?.find(b => b.type === "text")?.text || "No response.";
-      setMessages([...newMessages, { role: "assistant", content: reply }]);
+
+      if (!response.ok || !response.body) {
+        throw new Error(`API error ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let streamedText = "";
+      // Transition from loading (dots) to streaming (live text)
+      setLoading(false);
+      setStreaming(true);
+      setMessages([...newMessages, { role: "assistant", content: "" }]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (!raw || raw === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(raw);
+            if (
+              parsed.type === "content_block_delta" &&
+              parsed.delta?.type === "text_delta"
+            ) {
+              streamedText += parsed.delta.text;
+              setMessages([
+                ...newMessages,
+                { role: "assistant", content: streamedText },
+              ]);
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+      setStreaming(false);
     } catch {
       setMessages([...newMessages, { role: "assistant", content: "Connection issue. Try again." }]);
+      setLoading(false);
+      setStreaming(false);
     }
-    setLoading(false);
   };
 
   const handleKey = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === "Enter" && !e.shiftKey && !streaming) { e.preventDefault(); sendMessage(); }
   };
 
   const formatMessage = (text) =>
@@ -519,11 +561,11 @@ export default function CEOMentor() {
               maxHeight:"140px", overflow:"auto", caretColor:"#C8A96E",
             }}
           />
-          <button onClick={() => sendMessage()} disabled={!input.trim() || loading} style={{
+          <button onClick={() => sendMessage()} disabled={!input.trim() || loading || streaming} style={{
             width:"36px", height:"36px", borderRadius:"8px", border:"none",
-            background: input.trim() && !loading ? "#C8A96E" : "rgba(200,169,110,0.12)",
-            color: input.trim() && !loading ? "#0d0b07" : "#4a3e28",
-            cursor: input.trim() && !loading ? "pointer" : "default",
+            background: input.trim() && !loading && !streaming ? "#C8A96E" : "rgba(200,169,110,0.12)",
+            color: input.trim() && !loading && !streaming ? "#0d0b07" : "#4a3e28",
+            cursor: input.trim() && !loading && !streaming ? "pointer" : "default",
             display:"flex", alignItems:"center", justifyContent:"center",
             transition:"all 0.2s", flexShrink:0,
           }}>
